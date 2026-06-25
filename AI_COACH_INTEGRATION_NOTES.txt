@@ -1,0 +1,11 @@
+Legacy AI Coach added to ai.html.
+
+Static demo:
+- Open ai.html and the chat runs in Demo Mode.
+
+Production:
+- Deploy legacy-ai-coach/backend.
+- Add OPENAI_API_KEY as an environment variable.
+- Set DEMO_MODE=false.
+- Run python ingest.py to build vector_store.json.
+- Point ai-coach.js fetch URL to the deployed backend if separate from the website.
