@@ -4,6 +4,7 @@ Builds a local knowledge base from data/book.pdf.
 For production-quality semantic search, run this after setting OPENAI_API_KEY.
 If no key is provided, the app can still run in DEMO_MODE using keyword retrieval.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,7 +45,16 @@ def extract_pdf_pages(pdf_path: Path) -> List[Dict[str, Any]]:
     return pages
 
 
-def chunk_pages(pages: List[Dict[str, Any]], max_words: int = 220, overlap: int = 45) -> List[Dict[str, Any]]:
+def chunk_pages(
+    pages: List[Dict[str, Any]], max_words: int = 220, overlap: int = 45
+) -> List[Dict[str, Any]]:
+    if (
+        type(max_words) is not int
+        or type(overlap) is not int
+        or max_words < 1
+        or not 0 <= overlap < max_words
+    ):
+        raise ValueError("overlap must be non-negative and smaller than max_words")
     chunks: List[Dict[str, Any]] = []
     for page in pages:
         words = page["text"].split()
@@ -53,7 +63,13 @@ def chunk_pages(pages: List[Dict[str, Any]], max_words: int = 220, overlap: int 
             end = min(start + max_words, len(words))
             chunk_text = " ".join(words[start:end]).strip()
             if len(chunk_text) > 80:
-                chunks.append({"id": f"p{page['page']}_c{len(chunks)+1}", "page": page["page"], "text": chunk_text})
+                chunks.append(
+                    {
+                        "id": f"p{page['page']}_c{len(chunks)+1}",
+                        "page": page["page"],
+                        "text": chunk_text,
+                    }
+                )
             if end == len(words):
                 break
             start = max(0, end - overlap)
@@ -63,14 +79,19 @@ def chunk_pages(pages: List[Dict[str, Any]], max_words: int = 220, overlap: int 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or api_key == "replace_with_your_openai_api_key":
-        raise RuntimeError("OPENAI_API_KEY is missing. Add it to backend/.env or hosting environment.")
+        raise RuntimeError(
+            "OPENAI_API_KEY is missing. Add it to backend/.env or hosting environment."
+        )
     client = OpenAI(api_key=api_key)
     embeddings: List[List[float]] = []
     batch_size = 64
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         response = client.embeddings.create(model=EMBED_MODEL, input=batch)
-        embeddings.extend([item.embedding for item in response.data])
+        ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(len(batch))):
+            raise RuntimeError("embedding response does not match the requested batch")
+        embeddings.extend([item.embedding for item in ordered])
     return embeddings
 
 
@@ -81,7 +102,11 @@ def main() -> None:
     embeddings = embed_texts([c["text"] for c in chunks])
     for chunk, embedding in zip(chunks, embeddings):
         chunk["embedding"] = embedding
-    STORE_PATH.write_text(json.dumps({"chunks": chunks}, ensure_ascii=False), encoding="utf-8")
+    temporary = STORE_PATH.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"chunks": chunks}, ensure_ascii=False), encoding="utf-8"
+    )
+    temporary.replace(STORE_PATH)
     print(f"Saved knowledge base to {STORE_PATH}")
 
 
