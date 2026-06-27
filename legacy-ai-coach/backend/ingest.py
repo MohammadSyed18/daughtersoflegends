@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from pypdf import PdfReader
 from openai import OpenAI
+from store_audit import require_valid_store
 
 load_dotenv()
 
@@ -102,6 +103,7 @@ def main() -> None:
     embeddings = embed_texts([c["text"] for c in chunks])
     for chunk, embedding in zip(chunks, embeddings):
         chunk["embedding"] = embedding
+    require_valid_store(chunks)
     temporary = STORE_PATH.with_suffix(".tmp")
     temporary.write_text(
         json.dumps({"chunks": chunks}, ensure_ascii=False), encoding="utf-8"
