@@ -12,7 +12,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from retrieval import PassageIndex
 
 load_dotenv()
 
@@ -25,21 +26,37 @@ DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000").split(",") if origin.strip()]
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000",
+    ).split(",")
+    if origin.strip()
+]
 
 app = FastAPI(title="Daughters of Legends Legacy AI Coach", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins + (["*"] if DEMO_MODE else []), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins + (["*"] if DEMO_MODE else []),
+    allow_credentials=not DEMO_MODE,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 client: Optional[OpenAI] = None
 if OPENAI_API_KEY and OPENAI_API_KEY != "replace_with_your_openai_api_key":
     client = OpenAI(api_key=OPENAI_API_KEY)
 
+
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=4000)
+
 
 class Source(BaseModel):
     page: int
     text: str
+
 
 class ChatResponse(BaseModel):
     answer: str
@@ -56,29 +73,31 @@ def load_store() -> List[Dict[str, Any]]:
         data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
         return data.get("chunks", [])
     return [
-        {"page": 11, "text": "The Legendary Mindset is a system of thinking and operating built on vision, blueprint, execution, strategy, faith, legacy, scale, and identity."},
-        {"page": 22, "text": "The Legendary Mindset is limitless and built on fearlessness, unstoppability, determination, consistency, discipline, focus, patience, awareness, and adaptability."},
-        {"page": 34, "text": "The Legacy Blueprint becomes real through clarity, filtering, and execution. You build by recognizing what belongs and removing what does not align."},
-        {"page": 43, "text": "If there is no movement, there is no blueprint. No movement, no legacy. No execution, no purpose. Execution separates vision from imagination."},
+        {
+            "page": 11,
+            "text": "The Legendary Mindset is a system of thinking and operating built on vision, blueprint, execution, strategy, faith, legacy, scale, and identity.",
+        },
+        {
+            "page": 22,
+            "text": "The Legendary Mindset is limitless and built on fearlessness, unstoppability, determination, consistency, discipline, focus, patience, awareness, and adaptability.",
+        },
+        {
+            "page": 34,
+            "text": "The Legacy Blueprint becomes real through clarity, filtering, and execution. You build by recognizing what belongs and removing what does not align.",
+        },
+        {
+            "page": 43,
+            "text": "If there is no movement, there is no blueprint. No movement, no legacy. No execution, no purpose. Execution separates vision from imagination.",
+        },
     ]
 
+
 CHUNKS = load_store()
+KEYWORD_INDEX = PassageIndex(CHUNKS)
 
 
 def keyword_retrieve(message: str, limit: int = 5) -> List[Dict[str, Any]]:
-    query_terms = set(normalize(message).split())
-    scored = []
-    for chunk in CHUNKS:
-        terms = set(normalize(chunk["text"]).split())
-        score = len(query_terms & terms)
-        lowered = chunk["text"].lower()
-        for key in ["legendary mindset", "legacy blueprint", "execution", "faith", "god", "strategy", "delay"]:
-            if key in lowered and key in message.lower():
-                score += 3
-        if score > 0:
-            scored.append((score, chunk))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [chunk for _, chunk in scored[:limit]] or CHUNKS[:limit]
+    return KEYWORD_INDEX.search(message, limit=limit)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -100,7 +119,10 @@ def semantic_retrieve(message: str, limit: int = 5) -> List[Dict[str, Any]]:
 
 
 def build_prompt(message: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    context = "\n\n".join(f"[Book page {chunk.get('page', 'unknown')}] {chunk['text']}" for chunk in chunks)
+    context = "\n\n".join(
+        f"[Book page {chunk.get('page', 'unknown')}] {chunk['text']}"
+        for chunk in chunks
+    )
     system = """You are the Daughters of Legends Legacy AI Coach.
 
 Your role:
@@ -127,9 +149,17 @@ def demo_answer(message: str, chunks: List[Dict[str, Any]]) -> str:
         return "The Legacy Blueprint becomes real through clarity, filtering, and execution. Not every idea belongs in the structure. The question is: does this expand the blueprint or reduce it? Your next step: remove one distraction that weakens the bigger vision."
     return "The book-based context points back to vision, execution, faith, and legacy. A Legendary Mindset does not wait for everyone to understand the vision before moving. It keeps building with discipline and alignment. Your next step: turn your question into one concrete action you can complete today."
 
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "demo_mode": DEMO_MODE, "has_openai_key": bool(client), "chunks_loaded": len(CHUNKS), "has_vector_store": STORE_PATH.exists()}
+    return {
+        "status": "ok",
+        "demo_mode": DEMO_MODE,
+        "has_openai_key": bool(client),
+        "chunks_loaded": len(CHUNKS),
+        "has_vector_store": STORE_PATH.exists(),
+    }
+
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
@@ -137,12 +167,25 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
     retrieved = semantic_retrieve(message, limit=5)
-    sources = [Source(page=int(c.get("page", 0)), text=c["text"][:320]) for c in retrieved[:3]]
+    if not retrieved:
+        return ChatResponse(
+            answer="I could not find a matching book passage. Try a more specific question about a book theme.",
+            sources=[],
+            mode="retrieval",
+        )
+    sources = [
+        Source(page=int(c.get("page", 0)), text=c["text"][:320]) for c in retrieved[:3]
+    ]
     if DEMO_MODE or not client:
-        return ChatResponse(answer=demo_answer(message, retrieved), sources=sources, mode="demo")
-    completion = client.chat.completions.create(model=CHAT_MODEL, messages=build_prompt(message, retrieved), temperature=0.45)
+        return ChatResponse(
+            answer=demo_answer(message, retrieved), sources=sources, mode="demo"
+        )
+    completion = client.chat.completions.create(
+        model=CHAT_MODEL, messages=build_prompt(message, retrieved), temperature=0.45
+    )
     answer = completion.choices[0].message.content or "I could not generate an answer."
     return ChatResponse(answer=answer, sources=sources, mode="openai")
+
 
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
